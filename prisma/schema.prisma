@@ -1,0 +1,324 @@
+// AI Nexus — Universal Multi-AI Workspace
+// Prisma schema (SQLite). All enums are stored as String for portability.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================
+// AUTH & USERS
+// =========================================================
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  passwordHash  String?
+  role          String   @default("user") // "user" | "admin"
+  planId        String?
+  plan          SubscriptionPlan? @relation(fields: [planId], references: [id])
+  status        String   @default("active") // "active" | "suspended" | "banned"
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions          Session[]
+  apiKeys           UserApiKey[]
+  conversations     Conversation[]
+  usageRecords      UsageRecord[]
+  subscriptions     Subscription[]
+  payments          Payment[]
+  auditLogs         AuditLog[]
+
+  @@index([email])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token        String   @unique
+  expiresAt    DateTime
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+}
+
+// =========================================================
+// PROVIDER REGISTRY (database-driven)
+// =========================================================
+
+model Provider {
+  id                 String   @id @default(cuid())
+  name               String   @unique // canonical id: "openai", "anthropic"...
+  displayName        String
+  description        String?
+  logoUrl            String?
+  color              String?  // brand accent color
+  baseUrl            String?
+  authType           String   @default("bearer") // "bearer" | "x-api-key" | "query"
+  apiFormat          String   @default("openai") // "openai" | "anthropic" | "gemini" | "openai-compatible"
+  documentationUrl   String?
+  status             String   @default("active") // "active" | "disabled" | "beta"
+  isCustom           Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  models             Model[]
+  platformCredentials PlatformCredential[]
+  healthEvents       ProviderHealth[]
+  userApiKeys        UserApiKey[]
+
+  @@index([status])
+}
+
+model Model {
+  id              String   @id @default(cuid())
+  providerId      String
+  provider        Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  modelName       String   // canonical model id used in API calls
+  displayName     String
+  contextWindow   Int      @default(8192)
+  maxOutput       Int      @default(4096)
+  capabilities    String   @default("chat") // comma list: "chat,vision,tools,reasoning"
+  inputPrice      Float    @default(0)   // USD per 1M input tokens
+  outputPrice     Float    @default(0)   // USD per 1M output tokens
+  status          String   @default("active") // "active" | "disabled" | "deprecated"
+  tags            String?  // e.g. "flagship,fast"
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  usageRecords    UsageRecord[]
+
+  @@unique([providerId, modelName])
+  @@index([providerId])
+  @@index([status])
+}
+
+// =========================================================
+// CREDENTIAL VAULT (encrypted at rest)
+// =========================================================
+
+// User-supplied BYOK keys — AES-256-GCM encrypted, never returned in plaintext.
+model UserApiKey {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerId      String
+  provider        Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  label           String?
+  // Encrypted blob: base64(iv).base64(ciphertext).base64(tag)
+  encryptedKey    String
+  keyHint         String   // last 4 chars for display, e.g. "••••92"
+  status          String   @default("active") // "active" | "disabled" | "invalid"
+  isValid         Boolean  @default(false)
+  validatedAt     DateTime?
+  isDefault       Boolean  @default(false)
+  lastUsedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([userId, providerId])
+  @@index([userId])
+}
+
+// Platform-owned provider credentials — NEVER exposed to users.
+model PlatformCredential {
+  id              String   @id @default(cuid())
+  providerId      String
+  provider        Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  encryptedKey    String
+  keyHint         String
+  envVar          String?  // optional: read from env instead of DB
+  status          String   @default("active") // "active" | "disabled"
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([providerId])
+}
+
+// =========================================================
+// CONVERSATIONS & MESSAGES
+// =========================================================
+
+model Conversation {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title         String   @default("New chat")
+  pinned        Boolean  @default(false)
+  // last selected provider/model/api source for continuity
+  providerId    String?
+  modelId       String?
+  apiSource     String   @default("platform") // "platform" | "byok"
+  temperature   Float    @default(0.7)
+  // optional project grouping
+  project       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  messages      Message[]
+
+  @@index([userId])
+  @@index([userId, updatedAt])
+}
+
+model Message {
+  id              String   @id @default(cuid())
+  conversationId  String
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role            String   // "user" | "assistant" | "system"
+  content         String
+  // context of generation
+  providerId      String?
+  modelName       String?
+  apiSource       String?  // "platform" | "byok"
+  inputTokens     Int      @default(0)
+  outputTokens    Int      @default(0)
+  latencyMs       Int      @default(0)
+  status          String   @default("complete") // "complete" | "streaming" | "error" | "stopped"
+  errorMessage    String?
+  attachments     String?  // JSON array of file meta
+  createdAt       DateTime @default(now())
+
+  @@index([conversationId])
+}
+
+// =========================================================
+// USAGE & QUOTA
+// =========================================================
+
+model UsageRecord {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerId      String
+  modelName       String
+  modelId         String?
+  model           Model?   @relation(fields: [modelId], references: [id])
+  apiSource       String   // "platform" | "byok"
+  inputTokens     Int      @default(0)
+  outputTokens    Int      @default(0)
+  totalTokens     Int      @default(0)
+  estimatedCost   Float    @default(0)
+  status          String   @default("success") // "success" | "error" | "rate_limited" | "quota_exceeded"
+  errorMessage    String?
+  conversationId  String?
+  createdAt       DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([apiSource, createdAt])
+  @@index([providerId])
+}
+
+// =========================================================
+// SUBSCRIPTIONS & BILLING
+// =========================================================
+
+model SubscriptionPlan {
+  id                    String   @id @default(cuid())
+  name                  String   @unique // "FREE" | "PRO" | "BUSINESS"
+  displayName           String
+  description           String?
+  priceMonthly          Float    @default(0)
+  priceYearly           Float    @default(0)
+  currency              String   @default("USD")
+  // limits stored as JSON string (SQLite has no native JSON type at schema level)
+  limitsJson            String   // { monthlyRequests, maxTokens, maxApiKeys, maxConversations, maxFileSizeMb, ... }
+  featuresJson          String   // string[] of feature flags
+  availableProviders    String?  // comma list of provider ids, null = all
+  priority              Int      @default(0)
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  users                 User[]
+  subscriptions         Subscription[]
+}
+
+model Subscription {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId          String
+  plan            SubscriptionPlan @relation(fields: [planId], references: [id])
+  status          String   @default("active") // "active" | "canceled" | "past_due" | "trialing"
+  periodStart     DateTime
+  periodEnd       DateTime
+  cancelAtPeriodEnd Boolean @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  payments        Payment[]
+
+  @@index([userId])
+}
+
+model Payment {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscriptionId  String?
+  subscription    Subscription? @relation(fields: [subscriptionId], references: [id])
+  amount          Float
+  currency        String   @default("USD")
+  status          String   @default("pending") // "pending" | "succeeded" | "failed" | "refunded"
+  provider        String   @default("mock") // adapter name: "mock" | "stripe" | ...
+  externalId      String?
+  invoiceUrl      String?
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+}
+
+// =========================================================
+// HEALTH & LOGGING
+// =========================================================
+
+model ProviderHealth {
+  id              String   @id @default(cuid())
+  providerId      String
+  provider        Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  status          String   @default("operational") // "operational" | "degraded" | "outage" | "unknown"
+  latencyMs       Int      @default(0)
+  errorRate       Float    @default(0)
+  message         String?
+  checkedAt       DateTime @default(now())
+
+  @@index([providerId, checkedAt])
+}
+
+model SystemLog {
+  id              String   @id @default(cuid())
+  level           String   @default("info") // "info" | "warn" | "error" | "debug"
+  category        String   @default("system") // "system" | "auth" | "provider" | "billing" | "security"
+  message         String
+  meta            String?  // JSON string
+  createdAt       DateTime @default(now())
+
+  @@index([level, createdAt])
+  @@index([category, createdAt])
+}
+
+model AuditLog {
+  id              String   @id @default(cuid())
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action          String   // "api_key.create", "provider.disable", "user.suspend"...
+  targetType      String?
+  targetId        String?
+  ip              String?
+  meta            String?  // JSON string
+  createdAt       DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}
