@@ -212,7 +212,7 @@ export function CompareView() {
   )
 }
 
-function Stat({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: string }) {
+function Stat({ icon: Icon, label, value }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string }) {
   return (
     <div className="flex items-center gap-1.5 text-muted-foreground">
       <Icon className="h-3 w-3" />

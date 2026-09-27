@@ -5,23 +5,74 @@ import { getProvider, ProviderError } from '@/lib/providers'
 import type { ChatMessage } from '@/lib/providers'
 import { resolveApiKey, checkPlatformQuota, getUserPlanLimits, recordUsage, type ApiSource } from '@/lib/usage'
 import { logSystem } from '@/lib/log'
+import type { Provider, Model } from '@prisma/client'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+interface FallbackCandidate {
+  provider: Provider
+  model: Model
+  apiKey: string
+  source: ApiSource
+}
+
+async function getFallbackCandidates(
+  userId: string,
+  excludeProviderId: string,
+  preferredSource: ApiSource
+): Promise<FallbackCandidate[]> {
+  const providers = await db.provider.findMany({
+    where: { status: 'active', id: { not: excludeProviderId } },
+    include: { models: { where: { status: 'active' } } },
+  })
+
+  // Priority order: Groq (ultra fast, high limits), DeepSeek (deep reasoning, high throughput), OpenAI, Anthropic, Gemini, Mistral, Qwen
+  const priorityOrder = ['groq', 'deepseek', 'openai', 'anthropic', 'gemini', 'mistral', 'qwen']
+  providers.sort((a, b) => {
+    const ia = priorityOrder.indexOf(a.name)
+    const ib = priorityOrder.indexOf(b.name)
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
+  })
+
+  const candidates: FallbackCandidate[] = []
+
+  for (const prov of providers) {
+    if (!prov.models.length) continue
+
+    const candidateModel =
+      prov.name === 'groq'
+        ? (prov.models.find((m) => m.modelName === 'openai/gpt-oss-120b') || prov.models.find((m) => m.modelName === 'openai/gpt-oss-20b') || prov.models[0])
+        : (prov.models.find((m) => m.tags?.includes('fast')) || prov.models.find((m) => m.tags?.includes('flagship')) || prov.models[0])
+
+    const sourcesToTry: ApiSource[] = preferredSource === 'byok' ? ['byok', 'platform'] : ['platform', 'byok']
+    for (const src of sourcesToTry) {
+      try {
+        const resolved = await resolveApiKey(userId, prov.id, src)
+        if (resolved.apiKey) {
+          candidates.push({
+            provider: prov,
+            model: candidateModel,
+            apiKey: resolved.apiKey,
+            source: resolved.source,
+          })
+          break
+        }
+      } catch {
+        // no key for this source, continue
+      }
+    }
+  }
+
+  return candidates
+}
+
 /**
- * POST /api/chat — streaming chat completion (Server-Sent Events).
+ * POST /api/chat — streaming chat completion with Automatic Limit Fallback.
  *
- * Body:
- *   conversationId, providerId, modelId, messages: ChatMessage[],
- *   apiSource: 'platform' | 'byok', temperature, maxTokens
- *
- * Emits SSE lines:
- *   data: {"type":"start","messageId":"..."}
- *   data: {"type":"delta","delta":"..."}
- *   data: {"type":"usage","inputTokens":N,"outputTokens":N,"cost":N,"source":"platform"}
- *   data: {"type":"done"}
- *   data: {"type":"error","message":"...","code":"...","actions":[...]}
+ * When an AI API key runs out of credits, hits rate limits, or exceeds quota:
+ * The server automatically switches to another available AI (e.g. OpenAI -> Groq -> DeepSeek)
+ * to ensure project creation and chat completions are finished without interruption.
  */
 export async function POST(req: NextRequest) {
   const user = await getCurrentUser()
@@ -37,36 +88,51 @@ export async function POST(req: NextRequest) {
     messages: ChatMessage[]
     temperature?: number
     maxTokens?: number
+    autoFallback?: boolean
   }
   const apiSource: ApiSource = body.apiSource === 'byok' ? 'byok' : 'platform'
+  const autoFallback = body.autoFallback !== false
 
   if (!providerId || !modelId || !Array.isArray(messages) || messages.length === 0) {
     return new Response(JSON.stringify({ error: 'providerId, modelId and messages are required' }), { status: 400, headers: { 'Content-Type': 'application/json' } })
   }
 
-  const provider = await db.provider.findUnique({ where: { id: providerId } })
-  const model = await db.model.findFirst({ where: { id: modelId, providerId } })
+  const provider = await db.provider.findFirst({
+    where: {
+      OR: [{ id: providerId }, { name: providerId }],
+    },
+  })
   if (!provider || provider.status !== 'active') {
     return new Response(JSON.stringify({ error: 'This provider is currently unavailable.' }), { status: 404, headers: { 'Content-Type': 'application/json' } })
   }
+  const model = await db.model.findFirst({
+    where: {
+      providerId: provider.id,
+      OR: [{ id: modelId }, { modelName: modelId }],
+    },
+  })
   if (!model || model.status !== 'active') {
     return new Response(JSON.stringify({ error: 'This model is currently unavailable.' }), { status: 404, headers: { 'Content-Type': 'application/json' } })
   }
 
   // Quota check for platform source
   const { limits } = await getUserPlanLimits(user.id)
+  let initialQuotaExceeded = false
   if (apiSource === 'platform') {
-    const quota = await checkPlatformQuota(user.id, providerId, limits)
+    const quota = await checkPlatformQuota(user.id, provider.id, limits)
     if (!quota.ok) {
-      const actions =
-        quota.reason === 'provider_not_allowed'
-          ? ['upgrade']
-          : ['byok', 'upgrade', 'switch_model']
-      const payload = JSON.stringify({ type: 'error', message: quota.message ?? 'Quota exceeded.', code: quota.reason, actions })
-      return new Response(`data: ${payload}\n\ndata: [DONE]\n\n`, {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
-      })
+      initialQuotaExceeded = true
+      if (!autoFallback) {
+        const actions =
+          quota.reason === 'provider_not_allowed'
+            ? ['upgrade']
+            : ['byok', 'upgrade', 'switch_model']
+        const payload = JSON.stringify({ type: 'error', message: quota.message ?? 'Quota exceeded.', code: quota.reason, actions })
+        return new Response(`data: ${payload}\n\ndata: [DONE]\n\n`, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+        })
+      }
     }
   }
 
@@ -88,7 +154,7 @@ export async function POST(req: NextRequest) {
                 role: 'user',
                 content: lastUserMsg.content,
                 apiSource,
-                providerId,
+                providerId: provider.id,
                 modelName: model.modelName,
                 status: 'complete',
               },
@@ -96,9 +162,9 @@ export async function POST(req: NextRequest) {
             // auto-title from first user message
             const count = await db.message.count({ where: { conversationId: conversation.id } })
             if (count === 1) {
-              await db.conversation.update({ where: { id: conversation.id }, data: { title: lastUserMsg.content.slice(0, 60), providerId, modelId, apiSource } })
+              await db.conversation.update({ where: { id: conversation.id }, data: { title: lastUserMsg.content.slice(0, 60), providerId: provider.id, modelId: model.id, apiSource } })
             } else {
-              await db.conversation.update({ where: { id: conversation.id }, data: { providerId, modelId, apiSource, updatedAt: new Date() } })
+              await db.conversation.update({ where: { id: conversation.id }, data: { providerId: provider.id, modelId: model.id, apiSource, updatedAt: new Date() } })
             }
           }
         }
@@ -112,7 +178,7 @@ export async function POST(req: NextRequest) {
               role: 'assistant',
               content: '',
               apiSource,
-              providerId,
+              providerId: provider.id,
               modelName: model.modelName,
               status: 'streaming',
             },
@@ -121,79 +187,230 @@ export async function POST(req: NextRequest) {
 
       send({ type: 'start', messageId: assistantMessage?.id })
 
-      // resolve credential
-      let apiKey: string
-      try {
-        const res = await resolveApiKey(user.id, providerId, apiSource)
-        apiKey = res.apiKey
-      } catch (e) {
-        const err = e as ProviderError
-        send({ type: 'error', message: err.message, code: err.code, actions: err.code === 'no_byok_key' ? ['byok', 'switch_model'] : ['switch_model'] })
-        if (assistantMessage) await db.message.update({ where: { id: assistantMessage.id }, data: { status: 'error', errorMessage: err.message } })
-        await recordUsage({ userId: user.id, providerId, modelName: model.modelName, modelId: model.id, apiSource, inputTokens: 0, outputTokens: 0, status: 'error', errorMessage: err.message, conversationId: conversation?.id })
+      // Build list of provider attempts (primary + fallbacks)
+      interface Attempt {
+        provider: typeof provider
+        model: typeof model
+        apiKey: string
+        source: ApiSource
+        isFallback: boolean
+      }
+
+      const attempts: Attempt[] = []
+
+      // If initial quota was not exceeded, try resolving the primary provider key
+      if (!initialQuotaExceeded) {
+        try {
+          const res = await resolveApiKey(user.id, provider.id, apiSource)
+          if (res.apiKey) {
+            attempts.push({
+              provider,
+              model,
+              apiKey: res.apiKey,
+              source: res.source,
+              isFallback: false,
+            })
+          }
+        } catch (e) {
+          if (!autoFallback) {
+            const err = e as ProviderError
+            send({ type: 'error', message: err.message, code: err.code, actions: err.code === 'no_byok_key' ? ['byok', 'switch_model'] : ['switch_model'] })
+            if (assistantMessage) await db.message.update({ where: { id: assistantMessage.id }, data: { status: 'error', errorMessage: err.message } })
+            await recordUsage({ userId: user.id, providerId: provider.id, modelName: model.modelName, modelId: model.id, apiSource, inputTokens: 0, outputTokens: 0, status: 'error', errorMessage: err.message, conversationId: conversation?.id })
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+            controller.close()
+            return
+          }
+        }
+      }
+
+      // If autoFallback is enabled, populate fallback alternatives
+      if (autoFallback) {
+        const fallbacks = await getFallbackCandidates(user.id, provider.id, apiSource)
+        for (const fb of fallbacks) {
+          attempts.push({
+            provider: fb.provider,
+            model: fb.model,
+            apiKey: fb.apiKey,
+            source: fb.source,
+            isFallback: true,
+          })
+        }
+      }
+
+      if (attempts.length === 0) {
+        const msg = 'No working API credentials found for any available AI provider. Please configure an API key in Settings → API Keys.'
+        send({ type: 'error', message: msg, code: 'no_credentials', actions: ['byok'] })
+        if (assistantMessage) await db.message.update({ where: { id: assistantMessage.id }, data: { status: 'error', errorMessage: msg } })
         controller.enqueue(encoder.encode('data: [DONE]\n\n'))
         controller.close()
         return
       }
 
-      const adapter = getProvider(provider)
+      let activeProvider = provider
+      let activeModel = model
+      let activeSource = apiSource
       let fullContent = ''
       let inputTokens = 0
       let outputTokens = 0
       let latencyMs = 0
-      let errorMessage: string | null = null
-      let errCode = 'provider_error'
+      let succeeded = false
+      let lastErrorMessage = ''
+      let lastErrCode = 'provider_error'
+      let fallbackEventSent = false
 
-      try {
-        const res = await adapter.streamMessage(
-          { model: model.modelName, messages, temperature, maxTokens, stream: true },
-          apiKey,
-          (chunk) => {
-            if (chunk.delta) {
-              fullContent += chunk.delta
-              send({ type: 'delta', delta: chunk.delta })
-            }
+      for (let i = 0; i < attempts.length; i++) {
+        const attempt = attempts[i]
+
+        if (attempt.isFallback) {
+          fallbackEventSent = true
+          send({
+            type: 'fallback',
+            fromProvider: activeProvider.displayName,
+            fromModel: activeModel.displayName,
+            toProvider: attempt.provider.displayName,
+            toModel: attempt.model.displayName,
+            toProviderId: attempt.provider.id,
+            reason: `${activeProvider.displayName} API limit/quota was reached. Switched to ${attempt.provider.displayName} (${attempt.model.displayName}) to finish your project seamlessly.`,
+          })
+
+          if (fullContent.length < 100) {
+            // Very early failure: clean reset to stream full answer from fallback
+            fullContent = ''
+          } else {
+            // Already generated partial answer: append note and continue
+            const transitionNote = `\n\n> ⚡ *[Switched to ${attempt.provider.displayName} (${attempt.model.displayName}) — previous AI reached limit]*\n\n`
+            fullContent += transitionNote
+            send({ type: 'delta', delta: transitionNote })
           }
-        )
-        inputTokens = res.inputTokens
-        outputTokens = res.outputTokens
-        latencyMs = res.latencyMs
-      } catch (e) {
-        const err = e as ProviderError
-        errorMessage = err.message
-        errCode = err.code
-        if (err.code === 'auth_error') {
-          errorMessage = `Your ${provider.displayName} API key could not be authenticated. Please verify it in Settings → API Keys.`
-        } else if (err.code === 'rate_limited') {
-          errorMessage = `${provider.displayName} is rate-limiting requests. Please wait a moment and try again.`
+
+          activeProvider = attempt.provider
+          activeModel = attempt.model
+          activeSource = attempt.source
+        }
+
+        const startAttempt = Date.now()
+        try {
+          const adapter = getProvider(attempt.provider)
+          const requestMessages = fullContent.length > 0 && attempt.isFallback
+            ? [
+                ...messages,
+                { role: 'assistant' as const, content: fullContent },
+                { role: 'user' as const, content: 'Please continue and complete the remaining response from where it left off.' }
+              ]
+            : messages
+
+          const res = await adapter.streamMessage(
+            { model: attempt.model.modelName, messages: requestMessages, temperature, maxTokens, stream: true },
+            attempt.apiKey,
+            (chunk) => {
+              if (chunk.delta) {
+                fullContent += chunk.delta
+                send({ type: 'delta', delta: chunk.delta })
+              }
+            }
+          )
+
+          inputTokens += res.inputTokens
+          outputTokens += res.outputTokens
+          latencyMs += (Date.now() - startAttempt)
+          succeeded = true
+
+          await db.providerHealth.create({
+            data: { providerId: attempt.provider.id, status: 'operational', latencyMs: res.latencyMs }
+          }).catch(() => {})
+
+          break
+        } catch (e) {
+          const err = e as ProviderError
+          lastErrorMessage = err.message || 'Unknown error'
+          lastErrCode = err.code || 'provider_error'
+
+          await db.providerHealth.create({
+            data: {
+              providerId: attempt.provider.id,
+              status: lastErrCode === 'auth_error' ? 'operational' : 'degraded',
+              message: lastErrorMessage
+            }
+          }).catch(() => {})
+
+          await logSystem('warn', 'provider', `${attempt.provider.name} stream error: ${lastErrorMessage}`, { code: lastErrCode })
+
+          if (!autoFallback) break
         }
       }
 
-      // Health signal
-      if (errorMessage) {
-        await db.providerHealth.create({ data: { providerId, status: errCode === 'auth_error' ? 'operational' : 'degraded', message: errorMessage } }).catch(() => {})
-      } else {
-        await db.providerHealth.create({ data: { providerId, status: 'operational', latencyMs } }).catch(() => {})
-      }
-
-      const cost = (inputTokens / 1_000_000) * model.inputPrice + (outputTokens / 1_000_000) * model.outputPrice
-
-      if (errorMessage) {
-        send({ type: 'error', message: errorMessage, code: errCode, actions: ['switch_model'] })
+      if (!succeeded) {
+        send({ type: 'error', message: lastErrorMessage, code: lastErrCode, actions: ['switch_model', 'byok'] })
         if (assistantMessage) {
-          await db.message.update({ where: { id: assistantMessage.id }, data: { status: 'error', errorMessage } })
+          await db.message.update({ where: { id: assistantMessage.id }, data: { status: 'error', errorMessage: lastErrorMessage } })
         }
-        await recordUsage({ userId: user.id, providerId, modelName: model.modelName, modelId: model.id, apiSource, inputTokens, outputTokens, status: 'error', errorMessage, conversationId: conversation?.id })
-        await logSystem('warn', 'provider', `${provider.name} chat error: ${errorMessage}`, { code: errCode })
+        await recordUsage({
+          userId: user.id,
+          providerId: activeProvider.id,
+          modelName: activeModel.modelName,
+          modelId: activeModel.id,
+          apiSource: activeSource,
+          inputTokens,
+          outputTokens,
+          status: 'error',
+          errorMessage: lastErrorMessage,
+          conversationId: conversation?.id
+        })
       } else {
-        send({ type: 'usage', inputTokens, outputTokens, cost: Math.round(cost * 1_000_000) / 1_000_000, source: apiSource, latencyMs, model: model.displayName, provider: provider.displayName })
+        const cost = (inputTokens / 1_000_000) * activeModel.inputPrice + (outputTokens / 1_000_000) * activeModel.outputPrice
+        send({
+          type: 'usage',
+          inputTokens,
+          outputTokens,
+          cost: Math.round(cost * 1_000_000) / 1_000_000,
+          source: activeSource,
+          latencyMs,
+          model: activeModel.displayName,
+          provider: activeProvider.displayName
+        })
+
         if (assistantMessage) {
           await db.message.update({
             where: { id: assistantMessage.id },
-            data: { content: fullContent, status: 'complete', inputTokens, outputTokens, latencyMs },
+            data: {
+              content: fullContent,
+              status: 'complete',
+              inputTokens,
+              outputTokens,
+              latencyMs,
+              providerId: activeProvider.id,
+              modelName: activeModel.modelName,
+              apiSource: activeSource,
+            },
           })
         }
-        await recordUsage({ userId: user.id, providerId, modelName: model.modelName, modelId: model.id, apiSource, inputTokens, outputTokens, status: 'success', conversationId: conversation?.id, estimatedCost: cost })
+
+        if (conversation && fallbackEventSent) {
+          await db.conversation.update({
+            where: { id: conversation.id },
+            data: {
+              providerId: activeProvider.id,
+              modelId: activeModel.id,
+              apiSource: activeSource,
+              updatedAt: new Date()
+            }
+          }).catch(() => {})
+        }
+
+        await recordUsage({
+          userId: user.id,
+          providerId: activeProvider.id,
+          modelName: activeModel.modelName,
+          modelId: activeModel.id,
+          apiSource: activeSource,
+          inputTokens,
+          outputTokens,
+          status: 'success',
+          conversationId: conversation?.id,
+          estimatedCost: cost
+        })
+
         send({ type: 'done' })
       }
 

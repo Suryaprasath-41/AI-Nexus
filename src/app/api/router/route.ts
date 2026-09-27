@@ -157,16 +157,17 @@ export async function POST(req: NextRequest) {
   })
 }
 
-function reasonFor(cat: TaskCategory, c: { provider: string; model: string; tags: string[]; source: string }): string {
+function reasonFor(cat: TaskCategory, c: { provider: string; model?: string; modelDisplayName?: string; tags: string[]; source: string }): string {
+  const modelName = c.modelDisplayName || c.model || 'This model'
   const via = c.source === 'byok' ? 'your connected API key' : 'platform API'
   switch (cat) {
-    case 'coding': return `${c.model} is strong at code generation and tool use. Routed via ${via}.`
-    case 'mathematics': return `${c.model} has reasoning capability suited for math. Routed via ${via}.`
-    case 'reasoning': return `${c.model} is a reasoning-capable model. Routed via ${via}.`
-    case 'writing': return `${c.model} produces natural, high-quality writing. Routed via ${via}.`
-    case 'summarization': return `${c.model} is fast and accurate for summarization. Routed via ${via}.`
-    case 'translation': return `${c.model} handles translation well. Routed via ${via}.`
-    case 'data_analysis': return `${c.model} supports tool use for structured data analysis. Routed via ${via}.`
-    default: return `${c.model} is a great general-purpose choice. Routed via ${via}.`
+    case 'coding': return `${modelName} is strong at code generation and tool use. Routed via ${via}.`
+    case 'mathematics': return `${modelName} has reasoning capability suited for math. Routed via ${via}.`
+    case 'reasoning': return `${modelName} is a reasoning-capable model. Routed via ${via}.`
+    case 'writing': return `${modelName} produces natural, high-quality writing. Routed via ${via}.`
+    case 'summarization': return `${modelName} is fast and accurate for summarization. Routed via ${via}.`
+    case 'translation': return `${modelName} handles translation well. Routed via ${via}.`
+    case 'data_analysis': return `${modelName} supports tool use for structured data analysis. Routed via ${via}.`
+    default: return `${modelName} is a great general-purpose choice. Routed via ${via}.`
   }
 }

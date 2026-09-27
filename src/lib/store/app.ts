@@ -66,6 +66,13 @@ export interface ChatMessage {
   status: string
   errorMessage: string | null
   attachments: string | null
+  fallbackInfo?: {
+    fromProvider: string
+    fromModel: string
+    toProvider: string
+    toModel: string
+    reason?: string
+  } | null
   createdAt: string
 }
 
@@ -111,6 +118,10 @@ interface AppState {
   // byok keys cache (for showing "connected" badges)
   byokProviders: Set<string>
   setByokProviders: (ids: string[]) => void
+
+  // auto failover when API limits / quotas are reached
+  autoFailover: boolean
+  setAutoFailover: (enabled: boolean) => void
 }
 
 export const useApp = create<AppState>((set) => ({
@@ -137,8 +148,8 @@ export const useApp = create<AppState>((set) => ({
   temperature: 0.7,
   setSelection: (s) =>
     set((state) => ({
-      providerId: s.providerId !== undefined ? s.providerId : state.providerId,
-      modelId: s.modelId !== undefined ? s.modelId : state.modelId,
+      providerId: s.providerId ? s.providerId : state.providerId,
+      modelId: s.modelId ? s.modelId : state.modelId,
       apiSource: s.apiSource !== undefined ? s.apiSource : state.apiSource,
       temperature: s.temperature !== undefined ? s.temperature : state.temperature,
     })),
@@ -156,4 +167,7 @@ export const useApp = create<AppState>((set) => ({
 
   byokProviders: new Set<string>(),
   setByokProviders: (ids) => set({ byokProviders: new Set(ids) }),
+
+  autoFailover: true,
+  setAutoFailover: (autoFailover) => set({ autoFailover }),
 }))

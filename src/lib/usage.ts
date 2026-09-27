@@ -78,8 +78,8 @@ export interface QuotaCheck {
 
 export async function checkPlatformQuota(userId: string, providerId: string, limits: PlanLimits): Promise<QuotaCheck> {
   // provider allowed by plan?
+  const provider = await db.provider.findFirst({ where: { OR: [{ id: providerId }, { name: providerId }] } })
   if (limits.availableProviders && limits.availableProviders.length > 0) {
-    const provider = await db.provider.findUnique({ where: { id: providerId } })
     if (provider && !limits.availableProviders.includes(provider.name)) {
       return { ok: false, reason: 'provider_not_allowed', message: 'This provider is not available on your plan.' }
     }
@@ -98,9 +98,12 @@ export async function checkPlatformQuota(userId: string, providerId: string, lim
 
 /** Resolve the actual API key to use for a request, based on source. */
 export async function resolveApiKey(userId: string, providerId: string, source: ApiSource): Promise<{ apiKey: string; source: ApiSource }> {
+  const provider = await db.provider.findFirst({ where: { OR: [{ id: providerId }, { name: providerId }] } })
+  if (!provider) throw new ProviderError('Unknown provider', 404, 'unknown_provider')
+
   if (source === 'byok') {
     const userKey = await db.userApiKey.findFirst({
-      where: { userId, providerId, status: 'active', isValid: true },
+      where: { userId, providerId: provider.id, status: 'active', isValid: true },
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     })
     if (!userKey) {
@@ -115,14 +118,11 @@ export async function resolveApiKey(userId: string, providerId: string, source: 
   }
 
   // Platform source: resolve from env first, then DB vault
-  const provider = await db.provider.findUnique({ where: { id: providerId } })
-  if (!provider) throw new ProviderError('Unknown provider', 404, 'unknown_provider')
-
   const envName = `PLATFORM_${provider.name.toUpperCase()}_API_KEY`
   const envVal = process.env[envName]
   if (envVal && envVal.trim()) return { apiKey: envVal.trim(), source: 'platform' }
 
-  const cred = await db.platformCredential.findFirst({ where: { providerId, status: 'active' } })
+  const cred = await db.platformCredential.findFirst({ where: { providerId: provider.id, status: 'active' } })
   if (cred) return { apiKey: decrypt(cred.encryptedKey), source: 'platform' }
 
   throw new ProviderError(

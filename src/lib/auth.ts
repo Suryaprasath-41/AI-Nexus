@@ -36,6 +36,45 @@ export async function createUser({ email, name, password, role = 'user' }: { ema
   return user
 }
 
+export async function createOrGetGuestUser(): Promise<User> {
+  const guestEmail = 'guest@ainexus.local'
+  let user = await db.user.findUnique({ where: { email: guestEmail } })
+  if (!user) {
+    const freePlan = await db.subscriptionPlan.findFirst({ where: { name: 'FREE' } })
+    user = await db.user.create({
+      data: {
+        email: guestEmail,
+        name: 'Guest User',
+        role: 'guest',
+        planId: freePlan?.id ?? null,
+        status: 'active',
+      },
+    })
+  }
+  return user
+}
+
+export async function createOrGetGoogleUser(email: string, name?: string): Promise<User> {
+  const normEmail = email.toLowerCase().trim()
+  let user = await db.user.findUnique({ where: { email: normEmail } })
+  if (!user) {
+    const freePlan = await db.subscriptionPlan.findFirst({ where: { name: 'FREE' } })
+    const randomHash = await hashPassword(randomToken(16))
+    user = await db.user.create({
+      data: {
+        email: normEmail,
+        name: name?.trim() || 'Google User',
+        role: 'user',
+        passwordHash: randomHash,
+        planId: freePlan?.id ?? null,
+        status: 'active',
+      },
+    })
+    await db.auditLog.create({ data: { userId: user.id, action: 'user.register' } }).catch(() => {})
+  }
+  return user
+}
+
 export async function authenticate(email: string, password: string): Promise<User | null> {
   const user = await db.user.findUnique({ where: { email: email.toLowerCase().trim() } })
   if (!user || !user.passwordHash) return null

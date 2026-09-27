@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'An account with this email already exists.' }, { status: 409 })
   }
 
-  const user = await createUser({ email, name, password })
+  const user = await createUser({ email, name: name ?? undefined, password })
   const token = await createSession(user)
   await setSessionCookie(token)
   await audit(user.id, 'user.login', { ip, meta: { via: 'register' } })

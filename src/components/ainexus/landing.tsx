@@ -5,7 +5,7 @@ import {
   Sparkles, ArrowRight, Zap, KeyRound, MessagesSquare, GitCompareArrows,
   Cpu, ShieldCheck, Shield, Server, EyeOff, ScrollText, Check, Plus,
   Brain, Code, Lightbulb, PenLine, Languages, MousePointerClick,
-  Lock, ChevronRight, Star, Layers, Gauge, Building2, Users,
+  Lock, ChevronRight, Star, Layers, Gauge, Building2, Users, UserCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -115,12 +115,27 @@ function LandingNav() {
           <Button
             variant="ghost"
             size="sm"
-            className="hidden sm:inline-flex"
+            className="text-xs text-muted-foreground hover:text-foreground"
+            onClick={async () => {
+              const res = await fetch('/api/auth/guest', { method: 'POST' })
+              const d = await res.json()
+              if (d.user) {
+                useApp.getState().setAuth(d.user)
+                useApp.getState().setView('chat')
+              }
+            }}
+          >
+            <UserCheck className="h-3.5 w-3.5 mr-1" /> Try as Guest
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="hidden sm:inline-flex text-xs"
             onClick={() => openAuth('login')}
           >
             Sign in
           </Button>
-          <Button size="sm" className="gap-1.5 neon-border" onClick={() => openAuth('register')}>
+          <Button size="sm" className="gap-1.5 neon-border text-xs" onClick={() => openAuth('register')}>
             <Sparkles className="h-3.5 w-3.5" />
             Start Using AI
           </Button>
@@ -192,6 +207,22 @@ function Hero() {
             >
               <Layers className="h-4 w-4" />
               Explore Models
+            </Button>
+            <Button
+              size="lg"
+              variant="secondary"
+              className="gap-2 glass"
+              onClick={async () => {
+                const res = await fetch('/api/auth/guest', { method: 'POST' })
+                const d = await res.json()
+                if (d.user) {
+                  useApp.getState().setAuth(d.user)
+                  useApp.getState().setView('chat')
+                }
+              }}
+            >
+              <UserCheck className="h-4 w-4 text-primary" />
+              Try as Guest
             </Button>
           </motion.div>
 

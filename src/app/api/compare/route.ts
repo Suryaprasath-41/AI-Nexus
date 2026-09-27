@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
         if (!provider || !model) throw new ProviderError('Provider or model not found', 404)
         const { apiKey } = await resolveApiKey(user.id, sel.providerId, sel.apiSource)
         const adapter = getProvider(provider)
-        const res = await adapter.sendMessage({ model: model.modelName, messages, temperature: 0.7 })
+        const res = await adapter.sendMessage({ model: model.modelName, messages, temperature: 0.7 }, apiKey)
         const cost = (res.inputTokens / 1_000_000) * model.inputPrice + (res.outputTokens / 1_000_000) * model.outputPrice
         await recordUsage({ userId: user.id, providerId: provider.id, modelName: model.modelName, modelId: model.id, apiSource: sel.apiSource, inputTokens: res.inputTokens, outputTokens: res.outputTokens, status: 'success', estimatedCost: cost })
         return {

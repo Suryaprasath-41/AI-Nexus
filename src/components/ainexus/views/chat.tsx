@@ -6,12 +6,11 @@ import { Markdown } from '../markdown'
 import { ProviderAvatar, formatTokens } from '../ui-bits'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
 import {
   Send, Square, RefreshCw, Copy, Check, Pencil, Trash2, Paperclip,
-  Sparkles, AlertTriangle, Zap, KeyRound, Mic, X, FileText, Cpu
+  Sparkles, AlertTriangle, Zap, KeyRound, Mic, X, FileText, Cpu, ArrowDown
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -30,31 +29,66 @@ export function ChatView() {
   const [editContent, setEditContent] = useState('')
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [showScrollButton, setShowScrollButton] = useState(false)
 
-  const provider = providers.find((p) => p.id === providerId)
-  const model = provider?.models.find((m) => m.id === modelId)
+  const fallbackProvider =
+    providers.find((p) => p.name === 'groq' && p.models?.length) ||
+    providers.find((p) => p.name === 'openai' && p.models?.length) ||
+    providers.find((p) => p.models?.length) ||
+    providers[0]
 
-  const scrollToBottom = useCallback(() => {
+  const provider = providers.find((p) => p.id === providerId || p.name === providerId) || fallbackProvider
+  const model = provider?.models.find((m) => m.id === modelId || m.modelName === modelId) || provider?.models[0]
+
+  // Auto-select fallback if selection is missing
+  useEffect(() => {
+    if ((!providerId || !modelId) && provider && model) {
+      useApp.getState().setSelection({
+        providerId: provider.id,
+        modelId: model.id,
+      })
+    }
+  }, [providerId, modelId, provider, model])
+
+  // Auto-focus input when conversation changes or opens
+  useEffect(() => {
+    textareaRef.current?.focus()
+  }, [currentConversationId])
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     requestAnimationFrame(() => {
       if (scrollRef.current) {
-        const el = scrollRef.current.querySelector('[data-radix-scroll-area-viewport]')
-        if (el) el.scrollTop = el.scrollHeight
+        scrollRef.current.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior,
+        })
       }
+      bottomRef.current?.scrollIntoView({ behavior, block: 'end' })
     })
   }, [])
 
+  function handleScroll() {
+    if (!scrollRef.current) return
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current
+    const distanceToBottom = scrollHeight - scrollTop - clientHeight
+    setShowScrollButton(distanceToBottom > 120)
+  }
+
   useEffect(() => {
-    scrollToBottom()
-  }, [messages, scrollToBottom])
+    scrollToBottom(streaming ? 'auto' : 'smooth')
+  }, [messages, streaming, scrollToBottom])
 
   async function ensureConversation(): Promise<string | null> {
     if (currentConversationId) return currentConversationId
-    if (!providerId || !modelId) return null
+    const activePid = provider?.id || providerId
+    const activeMid = model?.id || modelId
+    if (!activePid || !activeMid) return null
     const res = await fetch('/api/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'New chat', providerId, modelId, apiSource, temperature }),
+      body: JSON.stringify({ title: 'New chat', providerId: activePid, modelId: activeMid, apiSource, temperature }),
     })
     const data = await res.json()
     if (data.conversation) {
@@ -68,8 +102,10 @@ export function ChatView() {
   async function send(prompt?: string) {
     const content = (prompt ?? input).trim()
     if (!content || streaming) return
-    if (!providerId || !modelId || !provider || !model) {
-      toast.error('Please select a model first.')
+    const activePid = provider?.id || providerId
+    const activeMid = model?.id || modelId
+    if (!activePid || !activeMid || !provider || !model) {
+      toast.error('Please select an AI model first.')
       return
     }
 
@@ -135,6 +171,7 @@ export function ChatView() {
           messages: sendMessages,
           apiSource,
           temperature,
+          autoFallback: useApp.getState().autoFailover,
         }),
         signal: controller.signal,
       })
@@ -165,6 +202,22 @@ export function ChatView() {
             const evt = JSON.parse(payload)
             if (evt.type === 'start') {
               realId = evt.messageId
+            } else if (evt.type === 'fallback') {
+              toast.info(`Switched to ${evt.toProvider}`, {
+                description: evt.reason || 'Switched provider to complete your project.',
+                duration: 5000,
+              })
+              updateMessage(assistantId, {
+                providerId: evt.toProviderId || undefined,
+                modelName: evt.toModel,
+                fallbackInfo: {
+                  fromProvider: evt.fromProvider,
+                  fromModel: evt.fromModel,
+                  toProvider: evt.toProvider,
+                  toModel: evt.toModel,
+                  reason: evt.reason,
+                },
+              })
             } else if (evt.type === 'delta') {
               accumulated += evt.delta
               updateMessage(assistantId, { content: accumulated })
@@ -230,6 +283,22 @@ export function ChatView() {
     regenerateSend(userMsg.content, history)
   }
 
+  async function switchAndRetry(message: ChatMessage) {
+    const { providers: allProv, providerId: currProvId, byokProviders } = useApp.getState()
+    const alt = allProv.find((p) => p.id !== currProvId && p.models.length > 0)
+    if (alt) {
+      const altModel = alt.models.find((m) => m.tags?.includes('fast')) || alt.models[0]
+      const source = byokProviders.has(alt.id) ? 'byok' : 'platform'
+      useApp.getState().setSelection({ providerId: alt.id, modelId: altModel.id, apiSource: source })
+      toast.info(`Switched to ${alt.displayName} (${altModel.displayName})`)
+      setTimeout(() => {
+        regenerate(message)
+      }, 50)
+    } else {
+      toast.error('No alternative AI provider available.')
+    }
+  }
+
   async function regenerateSend(content: string, history: { role: string; content: string }[]) {
     if (!providerId || !modelId || !model) return
     const assistantId = `temp-a-${Date.now()}`
@@ -262,6 +331,7 @@ export function ChatView() {
           messages: [...history, { role: 'user', content }],
           apiSource,
           temperature,
+          autoFallback: useApp.getState().autoFailover,
         }),
         signal: controller.signal,
       })
@@ -283,7 +353,23 @@ export function ChatView() {
           try {
             const evt = JSON.parse(payload)
             if (evt.type === 'start') realId = evt.messageId
-            else if (evt.type === 'delta') {
+            else if (evt.type === 'fallback') {
+              toast.info(`Switched to ${evt.toProvider}`, {
+                description: evt.reason || 'Switched provider to complete your project.',
+                duration: 5000,
+              })
+              updateMessage(assistantId, {
+                providerId: evt.toProviderId || undefined,
+                modelName: evt.toModel,
+                fallbackInfo: {
+                  fromProvider: evt.fromProvider,
+                  fromModel: evt.fromModel,
+                  toProvider: evt.toProvider,
+                  toModel: evt.toModel,
+                  reason: evt.reason,
+                },
+              })
+            } else if (evt.type === 'delta') {
               accumulated += evt.delta
               updateMessage(assistantId, { content: accumulated })
             } else if (evt.type === 'usage') {
@@ -349,24 +435,14 @@ export function ChatView() {
     }
   }
 
-  if (!providerId || !modelId) {
-    return (
-      <div className="h-full flex items-center justify-center p-8">
-        <div className="text-center max-w-md">
-          <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-primary to-chart-3 mx-auto mb-4 flex items-center justify-center glow">
-            <Sparkles className="h-7 w-7 text-white" />
-          </div>
-          <h2 className="text-xl font-semibold mb-2">Welcome to AI Nexus</h2>
-          <p className="text-sm text-muted-foreground mb-4">Select a provider and model from the top bar to start chatting with any AI — all in one workspace.</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full w-full flex flex-col min-h-0 overflow-hidden relative">
       {/* Messages */}
-      <ScrollArea ref={scrollRef} className="flex-1 custom-scroll">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex-1 min-h-0 overflow-y-auto custom-scroll"
+      >
         <div className="max-w-3xl mx-auto px-4 py-6">
           {messages.length === 0 ? (
             <EmptyState providerName={provider?.displayName} modelName={model?.displayName} onPick={(p) => send(p)} />
@@ -387,15 +463,28 @@ export function ChatView() {
                   onEditChange={setEditContent}
                   onRegenerate={() => regenerate(m)}
                   onDelete={() => deleteMessage(m)}
+                  onSwitchAndRetry={() => switchAndRetry(m)}
                 />
               ))}
+              <div ref={bottomRef} className="h-2 w-full shrink-0" />
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
+
+      {/* Floating Scroll to Bottom button */}
+      {showScrollButton && (
+        <button
+          onClick={() => scrollToBottom('smooth')}
+          className="absolute bottom-28 right-8 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary text-primary-foreground text-xs font-medium shadow-xl hover:bg-primary/90 transition-all cursor-pointer glow"
+        >
+          <ArrowDown className="h-3.5 w-3.5" />
+          <span>Scroll to bottom</span>
+        </button>
+      )}
 
       {/* Composer */}
-      <div className="border-t border-border p-3 shrink-0">
+      <div className="border-t border-border p-3 shrink-0 bg-background/95 backdrop-blur z-20">
         <div className="max-w-3xl mx-auto">
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-2">
@@ -420,7 +509,7 @@ export function ChatView() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={`Message ${provider?.displayName} ${model?.displayName}…`}
+              placeholder={provider && model ? `Message ${provider.displayName} ${model.displayName}…` : 'Type a message to chat…'}
               className="min-h-[52px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 pr-24"
               disabled={streaming}
             />
@@ -442,7 +531,7 @@ export function ChatView() {
           </div>
           <div className="flex items-center justify-between mt-1.5 px-1">
             <p className="text-[10px] text-muted-foreground">
-              {model?.contextWindow.toLocaleString()} ctx · ${model?.inputPrice}/M in · Press Enter to send, Shift+Enter for newline
+              {(model?.contextWindow ?? 8192).toLocaleString()} ctx · ${model?.inputPrice ?? 0}/M in · Press Enter to send, Shift+Enter for newline
             </p>
             <p className="text-[10px] text-muted-foreground flex items-center gap-1">
               {apiSource === 'byok' ? <><KeyRound className="h-3 w-3" /> BYOK</> : <><Zap className="h-3 w-3" /> Platform</>}
@@ -480,7 +569,7 @@ function EmptyState({ providerName, modelName, onPick }: { providerName?: string
   )
 }
 
-function MessageBubble({ message, provider, modelName, streaming, editing, editContent, onEditStart, onEditCancel, onEditSave, onEditChange, onRegenerate, onDelete }: {
+function MessageBubble({ message, provider, modelName, streaming, editing, editContent, onEditStart, onEditCancel, onEditSave, onEditChange, onRegenerate, onDelete, onSwitchAndRetry }: {
   message: ChatMessage
   provider?: { id: string; name: string; displayName: string; color?: string | null }
   modelName?: string
@@ -493,6 +582,7 @@ function MessageBubble({ message, provider, modelName, streaming, editing, editC
   onEditChange: (v: string) => void
   onRegenerate: () => void
   onDelete: () => void
+  onSwitchAndRetry?: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
@@ -519,6 +609,14 @@ function MessageBubble({ message, provider, modelName, streaming, editing, editC
           )}
         </div>
         <div className={cn('rounded-2xl px-4 py-2.5', isUser ? 'bg-primary text-primary-foreground' : 'bg-card border border-border/50 glass')}>
+          {message.fallbackInfo && (
+            <div className="flex items-center gap-1.5 text-xs text-amber-500 dark:text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-2.5 py-1 mb-2">
+              <Zap className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+              <span>
+                Auto-switched from <strong>{message.fallbackInfo.fromProvider}</strong> to <strong>{message.fallbackInfo.toProvider}</strong> ({message.fallbackInfo.toModel}) — API limit reached
+              </span>
+            </div>
+          )}
           {editing ? (
             <div className="space-y-2">
               <textarea value={editContent} onChange={(e) => onEditChange(e.target.value)} className="w-full min-h-[80px] bg-transparent border border-border/50 rounded-lg p-2 text-sm outline-none focus:border-primary" autoFocus />
@@ -530,11 +628,23 @@ function MessageBubble({ message, provider, modelName, streaming, editing, editC
           ) : isUser ? (
             <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
           ) : isError ? (
-            <div className="flex items-start gap-2 text-sm">
+            <div className="flex items-start gap-2.5 text-sm">
               <AlertTriangle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
-              <div>
-                <p className="text-destructive">{message.errorMessage || 'An error occurred.'}</p>
-                <p className="text-xs text-muted-foreground mt-1">Try regenerating, switching models, or using your own API key.</p>
+              <div className="flex-1 space-y-2">
+                <div>
+                  <p className="text-destructive font-medium">{message.errorMessage || 'An error occurred.'}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">The current AI model or API key hit a limit or failed.</p>
+                </div>
+                {onSwitchAndRetry && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs gap-1.5 border-primary/40 text-primary hover:bg-primary/10"
+                    onClick={onSwitchAndRetry}
+                  >
+                    <Zap className="h-3 w-3" /> Switch to another AI & Retry
+                  </Button>
+                )}
               </div>
             </div>
           ) : (

@@ -133,7 +133,7 @@ export function UsageView() {
   )
 }
 
-function StatCard({ icon: Icon, label, value, sub, color }: { icon: React.ElementType; label: string; value: string; sub: string; color: string }) {
+function StatCard({ icon: Icon, label, value, sub, color }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string; sub: string; color: string }) {
   return (
     <Card className="p-4 glass">
       <div className="flex items-center gap-2 mb-1">

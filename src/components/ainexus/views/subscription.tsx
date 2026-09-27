@@ -25,7 +25,7 @@ interface CurrentSub {
   subscription: { id: string; status: string; periodStart: string; periodEnd: string; cancelAtPeriodEnd: boolean } | null
 }
 
-const PLAN_ICONS: Record<string, React.ElementType> = { FREE: Sparkles, PRO: Zap, BUSINESS: Crown }
+const PLAN_ICONS: Record<string, React.ComponentType<{ className?: string }>> = { FREE: Sparkles, PRO: Zap, BUSINESS: Crown }
 
 export function SubscriptionView() {
   const { user, setAuth } = useApp()

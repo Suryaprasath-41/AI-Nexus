@@ -224,10 +224,6 @@ async function main() {
   const adminEmail = 'admin@ainexus.ai'
   const existing = await db.user.findUnique({ where: { email: adminEmail } })
   if (!existing) {
-    const { scrypt: scryptSync } = await import('node:crypto')
-    // Use the same hashing as the app for consistency
-    const salt = scryptSync.randomBytes ? scryptSync.randomBytes(16).toString('hex') : Math.random().toString(36)
-    // simpler: just use a known hash via the crypto util at runtime — but seed runs standalone, so inline scrypt
     const crypto = await import('node:crypto')
     const s = crypto.randomBytes(16).toString('hex')
     const h = crypto.scryptSync('admin123', s, 64).toString('hex')

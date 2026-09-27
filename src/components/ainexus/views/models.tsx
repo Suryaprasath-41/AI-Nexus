@@ -11,10 +11,10 @@ import { Search, Cpu, Sparkles, Zap, Brain, Eye, Wrench, KeyRound, Zap as ZapIco
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 
-const CAPABILITY_ICONS: Record<string, React.ElementType> = {
+const CAPABILITY_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   chat: Cpu, vision: Eye, tools: Wrench, reasoning: Brain,
 }
-const TAG_ICONS: Record<string, { icon: React.ElementType; color: string }> = {
+const TAG_ICONS: Record<string, { icon: React.ComponentType<{ className?: string }>; color: string }> = {
   flagship: { icon: Sparkles, color: 'text-amber-500' },
   fast: { icon: Zap, color: 'text-cyan-500' },
   reasoning: { icon: Brain, color: 'text-violet-500' },

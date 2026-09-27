@@ -19,7 +19,7 @@ export interface ChatRequest {
 }
 
 export interface ChatResponseChunk {
-  delta: string
+  delta?: string
   inputTokens?: number
   outputTokens?: number
   finishReason?: string

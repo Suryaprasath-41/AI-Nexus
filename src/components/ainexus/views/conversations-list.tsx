@@ -42,11 +42,22 @@ export function ConversationsList() {
     const data = await res.json()
     if (data.messages) setMessages(data.messages)
     if (data.conversation) {
-      useApp.getState().setSelection({
-        providerId: data.conversation.providerId,
-        modelId: data.conversation.modelId,
+      const state = useApp.getState()
+      const prov = state.providers.find((p) => p.id === data.conversation.providerId || p.name === data.conversation.providerId)
+      const targetProv =
+        prov ||
+        state.providers.find((p) => p.id === state.providerId) ||
+        state.providers.find((p) => p.name === 'groq' && p.models?.length) ||
+        state.providers[0]
+      const mod =
+        targetProv?.models.find((m) => m.id === data.conversation.modelId || m.modelName === data.conversation.modelId) ||
+        targetProv?.models[0]
+
+      state.setSelection({
+        providerId: targetProv?.id ?? state.providerId ?? undefined,
+        modelId: mod?.id ?? state.modelId ?? undefined,
         apiSource: data.conversation.apiSource === 'byok' ? 'byok' : 'platform',
-        temperature: data.conversation.temperature,
+        temperature: typeof data.conversation.temperature === 'number' ? data.conversation.temperature : 0.7,
       })
     }
   }
@@ -144,7 +155,7 @@ function ConvItem({ c, active, onOpen, onRename, onPin, onDelete }: {
     >
       {c.pinned && <Pin className="h-3 w-3 text-amber-500 shrink-0" />}
       <span className="flex-1 truncate">{c.title}</span>
-      <span className="text-[10px] text-muted-foreground/70 shrink-0">{c._count.messages}</span>
+      <span className="text-[10px] text-muted-foreground/70 shrink-0">{c._count?.messages ?? 0}</span>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 shrink-0" onClick={(e) => e.stopPropagation()}>

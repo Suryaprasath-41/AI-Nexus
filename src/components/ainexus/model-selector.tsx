@@ -16,8 +16,14 @@ export function ModelSelector() {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
 
-  const currentProvider = providers.find((p) => p.id === providerId)
-  const currentModel = currentProvider?.models.find((m) => m.id === modelId)
+  const fallbackProvider =
+    providers.find((p) => p.name === 'groq' && p.models?.length) ||
+    providers.find((p) => p.name === 'openai' && p.models?.length) ||
+    providers.find((p) => p.models?.length) ||
+    providers[0]
+
+  const currentProvider = providers.find((p) => p.id === providerId || p.name === providerId) || fallbackProvider
+  const currentModel = currentProvider?.models.find((m) => m.id === modelId || m.modelName === modelId) || currentProvider?.models[0]
 
   const filtered = useMemo(() => {
     if (!query.trim()) return providers

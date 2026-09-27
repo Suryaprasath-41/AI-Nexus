@@ -13,6 +13,7 @@ import { SettingsView } from './views/settings'
 import { AdminView } from './views/admin'
 import { FilesView } from './views/files'
 import { ConversationsList } from './views/conversations-list'
+import { ProjectModal } from './project-modal'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -29,7 +30,7 @@ import { toast } from 'sonner'
 import {
   Sparkles, Plus, Search, MessageSquare, GitCompareArrows, KeyRound, Cpu,
   BarChart3, CreditCard, Settings as SettingsIcon, ShieldCheck, Files,
-  LogOut, User, Sun, Moon, Zap, Power, Loader2
+  LogOut, User, Sun, Moon, Zap, Power, Loader2, FolderPlus
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -50,6 +51,7 @@ export function AppShell() {
   const { user, view, setView, providers, setProviders, providersLoading, setProvidersLoading, setByokProviders, openAuth } = useApp()
   const [dark, setDark] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [projectModalOpen, setProjectModalOpen] = useState(false)
 
   // load providers registry + byok providers on mount
   useEffect(() => {
@@ -62,7 +64,24 @@ export function AppShell() {
           fetch('/api/api-keys').then((r) => r.json()),
         ])
         if (cancelled) return
-        if (pRes.providers) setProviders(pRes.providers)
+        if (pRes.providers && pRes.providers.length > 0) {
+          setProviders(pRes.providers)
+          const state = useApp.getState()
+          if (!state.providerId || !state.modelId) {
+            const defaultProv =
+              pRes.providers.find((p: { name: string; models?: unknown[] }) => p.name === 'groq' && p.models?.length) ||
+              pRes.providers.find((p: { name: string; models?: unknown[] }) => p.name === 'openai' && p.models?.length) ||
+              pRes.providers.find((p: { models?: unknown[] }) => p.models?.length) ||
+              pRes.providers[0]
+            if (defaultProv && defaultProv.models?.length) {
+              state.setSelection({
+                providerId: defaultProv.id,
+                modelId: defaultProv.models[0].id,
+                apiSource: 'platform',
+              })
+            }
+          }
+        }
         if (kRes.keys) setByokProviders(kRes.keys.map((k: { provider: { id: string } }) => k.provider.id))
       } finally {
         if (!cancelled) setProvidersLoading(false)
@@ -108,8 +127,8 @@ export function AppShell() {
           </Button>
         </div>
 
-        {/* New chat */}
-        <div className="p-3">
+        {/* Actions: New Chat & Create Project */}
+        <div className="p-3 space-y-2">
           <Button
             className="w-full justify-start gap-2 neon-border"
             onClick={() => {
@@ -119,6 +138,14 @@ export function AppShell() {
             }}
           >
             <Plus className="h-4 w-4" /> New chat
+          </Button>
+
+          <Button
+            variant="outline"
+            className="w-full justify-start gap-2 glass border-primary/40 hover:border-primary text-xs"
+            onClick={() => setProjectModalOpen(true)}
+          >
+            <FolderPlus className="h-4 w-4 text-primary" /> Create Project
           </Button>
         </div>
 
@@ -159,12 +186,24 @@ export function AppShell() {
                   <AvatarFallback className="bg-primary/15 text-primary text-xs">{(user?.name || user?.email || 'U').charAt(0).toUpperCase()}</AvatarFallback>
                 </Avatar>
                 <div className="flex-1 min-w-0 text-left">
-                  <div className="text-sm font-medium truncate">{user?.name || 'User'}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-sm font-medium truncate">{user?.name || 'User'}</span>
+                    {user?.role === 'guest' && (
+                      <Badge variant="outline" className="text-[9px] px-1 py-0 border-amber-500/40 text-amber-500 bg-amber-500/10">
+                        Guest
+                      </Badge>
+                    )}
+                  </div>
                   <div className="text-[10px] text-muted-foreground truncate">{user?.email}</div>
                 </div>
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-52">
+              {user?.role === 'guest' && (
+                <DropdownMenuItem onClick={() => openAuth('login')} className="text-primary font-medium focus:text-primary">
+                  <Sparkles className="h-4 w-4 mr-2 text-primary" /> Sign in to create projects
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={() => setView('settings')}>
                 <User className="h-4 w-4 mr-2" /> Profile
               </DropdownMenuItem>
@@ -193,7 +232,7 @@ export function AppShell() {
       {sidebarOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setSidebarOpen(false)} />}
 
       {/* Main */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 h-full overflow-hidden">
         {/* Top bar */}
         <header className="h-14 border-b border-border flex items-center gap-2 px-3 shrink-0 glass">
           <Button variant="ghost" size="icon" className="lg:hidden h-9 w-9" onClick={() => setSidebarOpen(true)}>
@@ -204,6 +243,7 @@ export function AppShell() {
               <ModelSelector />
               <ApiSourceToggle />
               <TemperatureControl />
+              <AutoFailoverToggle />
             </>
           ) : (
             <div className="flex items-center gap-2">
@@ -216,7 +256,7 @@ export function AppShell() {
         </header>
 
         {/* View */}
-        <main className="flex-1 overflow-hidden">
+        <main className="flex-1 min-h-0 h-full overflow-hidden relative flex flex-col">
           {providersLoading ? (
             <div className="h-full flex items-center justify-center">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
@@ -244,6 +284,8 @@ export function AppShell() {
           )}
         </main>
       </div>
+
+      <ProjectModal open={projectModalOpen} onOpenChange={setProjectModalOpen} />
     </div>
   )
 }
@@ -318,6 +360,43 @@ function TemperatureControl() {
               <span>Creative</span>
             </div>
           </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function AutoFailoverToggle() {
+  const { autoFailover, setAutoFailover } = useApp()
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              const next = !autoFailover
+              setAutoFailover(next)
+              toast.info(
+                next
+                  ? 'Auto-Switch enabled: Automatically switches AI models if limit or quota is completed.'
+                  : 'Auto-Switch disabled.'
+              )
+            }}
+            className={cn(
+              'h-9 px-2.5 text-xs gap-1.5 transition-all border rounded-lg',
+              autoFailover
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20'
+                : 'border-border text-muted-foreground hover:bg-card'
+            )}
+          >
+            <Zap className={cn('h-3.5 w-3.5', autoFailover ? 'text-emerald-500 fill-emerald-500/20' : 'text-muted-foreground')} />
+            <span className="hidden sm:inline font-medium">Auto-Switch: {autoFailover ? 'ON' : 'OFF'}</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-[240px] text-xs">
+          <strong>Automatic AI Failover:</strong> If the active model hits a rate limit, runs out of credits, or quota is completed, it automatically switches to another available AI (Groq, DeepSeek, OpenAI) so your project completes without stopping.
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
